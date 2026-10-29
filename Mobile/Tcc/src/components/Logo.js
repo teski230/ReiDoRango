@@ -2,26 +2,18 @@ import React from "react";
 
 import {
   View,
-  Text,
+  Image,
   StyleSheet,
 } from "react-native";
-
-import { Ionicons } from "@expo/vector-icons";
 
 export default function Logo() {
   return (
     <View style={styles.container}>
-
-      <Ionicons
-        name="fast-food"
-        size={42}
-        color="#ff3131"
+      <Image
+        source={require("../../assets/Logo.png")}
+        style={styles.image}
+        resizeMode="contain"
       />
-
-      <Text style={styles.text}>
-        REI DO RANGO
-      </Text>
-
     </View>
   );
 }
@@ -30,15 +22,11 @@ const styles = StyleSheet.create({
   container: {
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 28,
+    marginBottom: 20,
   },
 
-  text: {
-    marginTop: -2,
-    color: "#ff3131",
-    fontSize: 24,
-    fontWeight: "900",
-    fontStyle: "italic",
-    letterSpacing: -1,
+  image: {
+    width: 170,
+    height: 170,
   },
 });

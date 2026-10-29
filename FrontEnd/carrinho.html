@@ -525,6 +525,8 @@ footer{
 
 <script>
 
+const API = "http://localhost:3000";
+
 let carrinho = JSON.parse(
     localStorage.getItem("carrinho")
 ) || [];
@@ -1101,97 +1103,155 @@ function selecionarPagamento(elemento, tipo){
    FINALIZAR
 ====================================================== */
 
-function finalizarPedido(){
 
-    if(carrinho.length === 0){
-
+async function finalizarPedido() {
+    if (carrinho.length === 0) {
         alert("Seu carrinho está vazio.");
-
         return;
-
     }
 
+    const rua = document.getElementById("rua").value.trim();
+    const numero = document.getElementById("numero").value.trim();
+    const bairro = document.getElementById("bairro").value.trim();
+    const cep = document.getElementById("cep").value.trim();
 
-    const rua =
-        document.getElementById("rua").value.trim();
-
-    const numero =
-        document.getElementById("numero").value.trim();
-
-    const bairro =
-        document.getElementById("bairro").value.trim();
-
-    const cep =
-        document.getElementById("cep").value.trim();
-
-
-    if(!rua || !numero || !bairro || !cep){
-
-        alert(
-            "Preencha o endereço de entrega."
-        );
-
+    if (!rua || !numero || !bairro || !cep) {
+        alert("Preencha o endereço de entrega.");
         return;
-
     }
 
-
-    const pagamento =
-        document.querySelector(
-            'input[name="pagamento"]:checked'
-        );
-
-
-    if(!pagamento){
-
-        alert(
-            "Escolha uma forma de pagamento."
-        );
-
-        return;
-
-    }
-
-
-    if(
-        pagamento.value === "dinheiro"
-    ){
-
-        const troco =
-            document.getElementById("troco").value;
-
-
-        if(!troco){
-
-            alert(
-                "Informe o valor para o troco."
-            );
-
-            return;
-
-        }
-
-    }
-
-
-    /*
-        POR ENQUANTO:
-
-        O pedido ainda não é enviado
-        para a API.
-
-        Nesta primeira versão estamos
-        somente validando o carrinho.
-    */
-
-
-    alert(
-        "Pedido pronto para finalizar!\n\n" +
-        "Na próxima etapa vamos conectar " +
-        "esta tela com a API e salvar o pedido no banco."
+    const pagamento = document.querySelector(
+        'input[name="pagamento"]:checked'
     );
 
+    if (!pagamento) {
+        alert("Escolha uma forma de pagamento.");
+        return;
+    }
+
+    let troco = null;
+
+    if (pagamento.value === "dinheiro") {
+        const campoTroco = document.getElementById("troco");
+        troco = Number(campoTroco.value);
+
+        if (!campoTroco.value || !Number.isFinite(troco) || troco <= 0) {
+            alert("Informe um valor válido para o troco.");
+            return;
+        }
+    }
+
+    // O login precisa ter guardado o token neste localStorage.
+    const token = localStorage.getItem("token");
+
+    if (!token) {
+        alert("Sua sessão não foi encontrada. Entre novamente na sua conta.");
+        return;
+    }
+
+    // Confere se todos os itens possuem o ID exigido pelo banco.
+    const itensInvalidos = carrinho.some(item =>
+        !Number.isInteger(Number(item.id_produto)) ||
+        Number(item.id_produto) <= 0 ||
+        !Number.isInteger(Number(item.quantidade)) ||
+        Number(item.quantidade) <= 0
+    );
+
+    if (itensInvalidos) {
+        alert(
+            "Há um produto inválido no carrinho. " +
+            "Volte ao cardápio e adicione o produto novamente."
+        );
+        return;
+    }
+
+    const itens = carrinho.map(item => ({
+        id_produto: Number(item.id_produto),
+        quantidade: Number(item.quantidade),
+        adicionais: (item.adicionais || []).map(adicional => ({
+            nome: adicional.nome,
+            preco: Number(adicional.preco)
+        })),
+        observacao: item.observacao || ""
+    }));
+
+    const dadosPedido = {
+        rua,
+        numero,
+        bairro,
+        cep,
+        forma_pagamento: pagamento.value,
+        troco_para: troco,
+        itens
+    };
+
+    const botao = document.querySelector(".btn-finalizar");
+
+    if (botao) {
+        botao.disabled = true;
+        botao.textContent = "REGISTRANDO PEDIDO...";
+    }
+
+    try {
+        const resposta = await fetch(`${API}/pedidos`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify(dadosPedido)
+        });
+
+        const resultado = await resposta.json().catch(() => ({}));
+
+        if (!resposta.ok || resultado.success === false) {
+            if (resposta.status === 401 || resposta.status === 403) {
+                throw new Error(
+                    "Sua sessão expirou ou você não tem autorização. " +
+                    "Entre novamente na sua conta."
+                );
+            }
+
+            throw new Error(
+                resultado.message ||
+                resultado.erro ||
+                "Não foi possível registrar o pedido."
+            );
+        }
+
+        // Só limpa o carrinho depois da confirmação da API.
+        localStorage.removeItem("carrinho");
+        carrinho = [];
+
+        mostrarCarrinho();
+
+        const idPedido = resultado.id || resultado.id_pedido;
+
+        alert(
+            "Pedido registrado com sucesso!" +
+            (idPedido ? `\nNúmero do pedido: ${idPedido}` : "") +
+            "\n\nSeu pedido foi enviado para o sistema."
+        );
+
+    } catch (erro) {
+        console.error("Erro ao finalizar pedido:", erro);
+
+        alert(
+            "Não foi possível finalizar o pedido.\n\n" +
+            erro.message +
+            "\n\nConfira se o servidor está ligado e tente novamente."
+        );
+
+    } finally {
+        const botaoAtual = document.querySelector(".btn-finalizar");
+
+        if (botaoAtual) {
+            botaoAtual.disabled = false;
+            botaoAtual.textContent = "CONTINUAR PARA PAGAMENTO";
+        }
+    }
 }
+
 
 
 /* ======================================================

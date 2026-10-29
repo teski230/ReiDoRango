@@ -11,6 +11,10 @@ export default function Input({
   label,
   placeholder,
   secureTextEntry = false,
+  value,
+  onChangeText,
+  keyboardType = "default",
+  autoCapitalize = "none",
 }) {
   return (
     <View style={styles.container}>
@@ -24,7 +28,10 @@ export default function Input({
         placeholder={placeholder}
         placeholderTextColor="#d6d2d2"
         secureTextEntry={secureTextEntry}
-        autoCapitalize="none"
+        autoCapitalize={autoCapitalize}
+        keyboardType={keyboardType}
+        value={value}
+        onChangeText={onChangeText}
       />
 
     </View>
