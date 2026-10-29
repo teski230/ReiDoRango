@@ -10,7 +10,22 @@ const multer = require("multer");
 const app = express();
 const PORT = 3000;
 
-const api_chave = "sua_chave_secreta_aqui";
+// Ideal: definir JWT_SECRET como variável de ambiente.
+// Enquanto isso, continua usando a chave antiga para não invalidar os tokens atuais.
+const api_chave = process.env.JWT_SECRET || "sua_chave_secreta_aqui";
+
+// Nome do papel (role) do administrador no token. Ajuste se o seu for diferente.
+const ADMIN_ROLE = "admin";
+
+const TAXA_ENTREGA = 5;
+
+// Valores do front -> valores do ENUM da tabela pedidos
+const FORMAS_PAGAMENTO = {
+    pix: 'Pix',
+    dinheiro: 'Dinheiro',
+    cartao: 'Cartão',
+    
+};
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
@@ -28,22 +43,16 @@ const upload = multer({
 });
 
 
-
+// ==================== MIDDLEWARES ====================
 
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
-});
-
-// ==================== MIDDLEWARES ====================
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-
 app.use("/uploads", express.static("uploads"));
+
 
 // ==================== CONEXÃO COM BANCO ====================
 
@@ -86,6 +95,19 @@ const autenticarToken = (req, res, next) => {
 
         next();
     });
+};
+
+// Restringe uma rota a certos papéis: exigirRole('admin'), exigirRole('entregador')
+const exigirRole = (...roles) => (req, res, next) => {
+
+    if (!roles.includes(req.user.role)) {
+        return res.status(403).json({
+            success: false,
+            message: "Sem permissão para esta ação"
+        });
+    }
+
+    next();
 };
 
 
@@ -294,8 +316,6 @@ app.get('/produtos/:id', async (req, res) => {
 });
 
 
-// Adicionar produto
-
 // ==================== ADICIONAR PRODUTO ====================
 
 app.post('/ADCprodutos', autenticarToken, upload.single("imagem"), async (req, res) => {
@@ -368,8 +388,6 @@ app.post('/ADCprodutos', autenticarToken, upload.single("imagem"), async (req, r
     }
 });
 
-
-// Atualizar produto
 
 // ==================== ATUALIZAR PRODUTO ====================
 
@@ -458,7 +476,7 @@ app.put('/ATZprodutos/:id', autenticarToken, async (req, res) => {
 });
 
 
-// Deletar produto
+// ==================== DELETAR PRODUTO ====================
 
 app.delete('/DELprodutos/:id', autenticarToken, async (req, res) => {
 
@@ -522,6 +540,7 @@ app.get('/verProdutos', async (req, res) => {
     }
 });
 
+
 // ==================== CATEGORIAS ====================
 
 app.get('/categorias', async (req, res) => {
@@ -545,11 +564,12 @@ app.get('/categorias', async (req, res) => {
     }
 });
 
+
 // ==================== CLIENTES ====================
 
-// Listar clientes
+// Listar clientes (somente admin)
 
-app.get('/clientes', autenticarToken, async (req, res) => {
+app.get('/clientes', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
@@ -579,13 +599,20 @@ app.get('/clientes', autenticarToken, async (req, res) => {
 });
 
 
-// Buscar cliente
+// Buscar cliente (admin ou o próprio cliente)
 
 app.get('/clientes/:id', autenticarToken, async (req, res) => {
 
     try {
 
         const { id } = req.params;
+
+        if (req.user.role !== ADMIN_ROLE && String(req.user.id) !== String(id)) {
+            return res.status(403).json({
+                success: false,
+                message: "Sem permissão"
+            });
+        }
 
         const [rows] = await db.query(
             `
@@ -596,7 +623,8 @@ app.get('/clientes/:id', autenticarToken, async (req, res) => {
                 bairro,
                 rua,
                 telefone,
-                N_casa
+                N_casa,
+                foto
             FROM clientes
             WHERE id_cliente = ?
             `,
@@ -626,19 +654,22 @@ app.get('/clientes/:id', autenticarToken, async (req, res) => {
 
 // ==================== PEDIDOS ====================
 
-// Listar pedidos
+// Listar todos os pedidos (somente admin)
 
-app.get('/pedidos', autenticarToken, async (req, res) => {
+app.get('/pedidos', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
         const [rows] = await db.query(`
             SELECT
                 p.*,
-                c.nome AS cliente_nome
+                c.nome AS cliente_nome,
+                e.nome AS entregador_nome
             FROM pedidos p
             LEFT JOIN clientes c
                 ON p.id_cliente = c.id_cliente
+            LEFT JOIN entregadores e
+                ON p.id_entregador = e.id_entregador
             ORDER BY p.id_pedido DESC
         `);
 
@@ -656,13 +687,20 @@ app.get('/pedidos', autenticarToken, async (req, res) => {
 });
 
 
-// Pedidos por cliente
+// Pedidos por cliente (admin ou o próprio cliente)
 
 app.get('/pedidos/cliente/:id_cliente', autenticarToken, async (req, res) => {
 
     try {
 
         const { id_cliente } = req.params;
+
+        if (req.user.role !== ADMIN_ROLE && String(req.user.id) !== String(id_cliente)) {
+            return res.status(403).json({
+                success: false,
+                message: "Sem permissão"
+            });
+        }
 
         const [rows] = await db.query(
             `
@@ -692,77 +730,172 @@ app.get('/pedidos/cliente/:id_cliente', autenticarToken, async (req, res) => {
 
 
 // Criar pedido
+// - id_cliente vem do token (não do front)
+// - o total é recalculado pelos preços do banco
+// - pedido e itens são gravados juntos numa transação
 
 app.post('/pedidos', autenticarToken, async (req, res) => {
 
+    const {
+        bairro,
+        rua,
+        numero,
+        cep,
+        complemento,
+        telefone,
+        forma_pagamento,
+        troco_para,
+        itens
+    } = req.body;
+
+    if (
+        !bairro ||
+        !rua ||
+        !numero ||
+        !forma_pagamento ||
+        !Array.isArray(itens) ||
+        itens.length === 0
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: "Campos obrigatórios faltando"
+        });
+    }
+
+    const forma = FORMAS_PAGAMENTO[forma_pagamento];
+
+    if (!forma) {
+        return res.status(400).json({
+            success: false,
+            message: "Forma de pagamento inválida"
+        });
+    }
+
+    const conn = await db.getConnection();
+
     try {
 
-        const {
-            id_cliente,
-            bairro,
-            rua,
-            numero,
-            complemento,
-            valor,
-            telefone,
-            forma_pagamento,
-            troco_para
-        } = req.body;
+        await conn.beginTransaction();
 
-        if (
-            !id_cliente ||
-            !bairro ||
-            !rua ||
-            !numero ||
-            !valor ||
-            !forma_pagamento
-        ) {
+        let subtotal = 0;
+        const linhas = [];
 
-            return res.status(400).json({
-                success: false,
-                message: "Campos obrigatórios faltando"
-            });
+        for (const item of itens) {
+
+            const qtd = parseInt(item.quantidade, 10);
+
+            if (!item.id_produto || !(qtd > 0)) {
+                throw new Error("ITEM_INVALIDO");
+            }
+
+            const [[produto]] = await conn.query(
+                'SELECT preco FROM produtos WHERE id_produto = ?',
+                [item.id_produto]
+            );
+
+            if (!produto) {
+                throw new Error("ITEM_INVALIDO");
+            }
+
+            const adicionais = Array.isArray(item.adicionais)
+                ? item.adicionais
+                : [];
+
+            const extras = adicionais.reduce(
+                (soma, a) => soma + (Number(a.preco) || 0),
+                0
+            );
+
+            const precoUnitario = Number(produto.preco) + extras;
+
+            subtotal += precoUnitario * qtd;
+
+            linhas.push([
+                item.id_produto,
+                qtd,
+                precoUnitario,
+                adicionais.length ? JSON.stringify(adicionais) : null,
+                item.observacao || null
+            ]);
         }
 
-        const sql = `
-            INSERT INTO pedidos
-            (
-                id_cliente,
-                bairro,
-                rua,
-                numero,
-                complemento,
-                valor,
-                telefone,
-                status,
-                forma_pagamento,
-                troco_para
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pendente', ?, ?)
-        `;
+        const total = Number((subtotal + TAXA_ENTREGA).toFixed(2));
 
-        const [resultado] = await db.query(
-            sql,
-            [
-                id_cliente,
-                bairro,
-                rua,
-                numero,
-                complemento || null,
-                valor,
-                telefone || null,
-                forma_pagamento,
-                troco_para || null
-            ]
+        if (forma_pagamento === 'dinheiro' && !(Number(troco_para) >= total)) {
+            throw new Error("TROCO_INVALIDO");
+        }
+
+        // Telefone do cliente, caso o front não envie
+        const [[cliente]] = await conn.query(
+            'SELECT telefone FROM clientes WHERE id_cliente = ?',
+            [req.user.id]
         );
+
+        
+const [pedido] = await conn.query(
+    `INSERT INTO pedidos (
+        id_cliente,
+        bairro,
+        rua,
+        numero,
+        cep,
+        complemento,
+        telefone,
+        valor,
+        forma_pagamento,
+        troco_para,
+        status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmado')`,
+    [
+        req.user.id,
+        bairro,
+        rua,
+        numero,
+        cep || null,
+        complemento || null,
+        telefone || (cliente && cliente.telefone) || null,
+        total,
+        forma,
+        forma_pagamento === 'dinheiro' ? troco_para : null
+    ]
+);
+
+
+        for (const l of linhas) {
+            await conn.query(
+                `INSERT INTO itens_pedido
+                (id_pedido, id_produto, quantidade, preco_unitario, adicionais, observacao)
+                VALUES (?, ?, ?, ?, ?, ?)`,
+                [pedido.insertId, ...l]
+            );
+        }
+
+        await conn.commit();
 
         res.status(201).json({
             success: true,
             message: "Pedido criado com sucesso",
-            id: resultado.insertId
+            id: pedido.insertId,
+            valor: total
         });
 
     } catch (error) {
+
+        await conn.rollback();
+
+        if (error.message === "ITEM_INVALIDO") {
+            return res.status(400).json({
+                success: false,
+                message: "Item inválido no carrinho"
+            });
+        }
+
+        if (error.message === "TROCO_INVALIDO") {
+            return res.status(400).json({
+                success: false,
+                message: "O troco deve ser maior ou igual ao total do pedido"
+            });
+        }
 
         console.error("Erro ao criar pedido:", error);
 
@@ -770,13 +903,17 @@ app.post('/pedidos', autenticarToken, async (req, res) => {
             success: false,
             message: "Erro ao criar pedido"
         });
+
+    } finally {
+
+        conn.release();
     }
 });
 
 
-// Atualizar status do pedido
+// Atualizar status do pedido (somente admin)
 
-app.put('/pedidos/:id/status', autenticarToken, async (req, res) => {
+app.put('/pedidos/:id/status', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
@@ -854,7 +991,10 @@ app.post('/entregadores/solicitar', async (req, res) => {
             nome,
             email,
             CNH,
-            senha
+            senha,
+            telefone,
+            veiculo,
+            placa
         } = req.body;
 
         if (!nome || !email || !CNH || !senha) {
@@ -894,9 +1034,12 @@ app.post('/entregadores/solicitar', async (req, res) => {
                 email,
                 CNH,
                 senha,
+                telefone,
+                veiculo,
+                placa,
                 status
             )
-            VALUES (?, ?, ?, ?, 'pendente')
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pendente')
         `;
 
         const [resultado] = await db.query(
@@ -905,7 +1048,10 @@ app.post('/entregadores/solicitar', async (req, res) => {
                 nome,
                 email,
                 CNH,
-                senhaHash
+                senhaHash,
+                telefone || null,
+                veiculo || null,
+                placa || null
             ]
         );
 
@@ -1035,10 +1181,10 @@ app.post("/entregadores/login", async (req, res) => {
 
 
 // ======================================================
-// LISTAR TODOS OS ENTREGADORES
+// ADMIN: LISTAR / APROVAR / REJEITAR ENTREGADORES
 // ======================================================
 
-app.get('/entregadores', autenticarToken, async (req, res) => {
+app.get('/entregadores', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
@@ -1048,6 +1194,9 @@ app.get('/entregadores', autenticarToken, async (req, res) => {
                 nome,
                 email,
                 CNH,
+                telefone,
+                veiculo,
+                placa,
                 status
             FROM entregadores
             ORDER BY id_entregador DESC
@@ -1071,11 +1220,7 @@ app.get('/entregadores', autenticarToken, async (req, res) => {
 });
 
 
-// ======================================================
-// LISTAR ENTREGADORES PENDENTES
-// ======================================================
-
-app.get('/entregadores/pendentes', autenticarToken, async (req, res) => {
+app.get('/entregadores/pendentes', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
@@ -1085,6 +1230,9 @@ app.get('/entregadores/pendentes', autenticarToken, async (req, res) => {
                 nome,
                 email,
                 CNH,
+                telefone,
+                veiculo,
+                placa,
                 status
             FROM entregadores
             WHERE status = 'pendente'
@@ -1109,11 +1257,7 @@ app.get('/entregadores/pendentes', autenticarToken, async (req, res) => {
 });
 
 
-// ======================================================
-// APROVAR ENTREGADOR
-// ======================================================
-
-app.put('/entregadores/:id/aprovar', autenticarToken, async (req, res) => {
+app.put('/entregadores/:id/aprovar', autenticarToken, exigirRole(ADMIN_ROLE), async (req, res) => {
 
     try {
 
@@ -1165,16 +1309,13 @@ app.put('/entregadores/:id/aprovar', autenticarToken, async (req, res) => {
 });
 
 
-// ======================================================
-// RECUSAR / REJEITAR ENTREGADOR
-// ======================================================
-
 app.put(
     [
         '/entregadores/:id/rejeitar',
         '/entregadores/:id/recusar'
     ],
     autenticarToken,
+    exigirRole(ADMIN_ROLE),
     async (req, res) => {
 
         try {
@@ -1227,68 +1368,256 @@ app.put(
     }
 );
 
-// APROVAR ENTREGADOR
-async function aprovarEntregador(id) {
 
-    if (!confirm("Deseja aprovar este entregador?")) return;
+// ======================================================
+// ÁREA DO ENTREGADOR
+// ======================================================
 
-    try {
-
-        const res = await fetch(`http://localhost:3000/entregadores/${id}/aprovar`, {
-            method: "PUT",
-            headers: {
-                Authorization: "Bearer " + token
-            }
-        });
-
-        if (!res.ok) {
-            throw new Error("Erro ao aprovar entregador");
-        }
-
-        alert("Entregador aprovado!");
-
-        listarEntregadores();
-
-    } catch (erro) {
-
-        console.error(erro);
-
-        alert("Não foi possível aprovar o entregador.");
-    }
-}
-
-// RECUSAR ENTREGADOR
-async function recusarEntregador(id) {
-
-    if (!confirm("Deseja recusar este entregador?")) return;
+// Pedidos disponíveis para aceitar
+app.get('/entregador/pedidos/disponiveis',
+    autenticarToken, exigirRole('entregador'), async (req, res) => {
 
     try {
 
-        const res = await fetch(`http://localhost:3000/entregadores/${id}/recusar`, {
-            method: "PUT",
-            headers: {
-                Authorization: "Bearer " + token
-            }
-        });
+        const [rows] = await db.query(`
+            SELECT id_pedido, bairro, rua, numero, complemento,
+                   valor, forma_pagamento, troco_para, data_pedido
+            FROM pedidos
+            WHERE id_entregador IS NULL
+              AND status IN ('confirmado', 'preparando')
+            ORDER BY data_pedido ASC
+        `);
 
-        if (!res.ok) {
-            throw new Error("Erro ao recusar entregador");
+        res.json(rows);
+
+    } catch (error) {
+
+        console.error("Erro ao listar disponíveis:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Erro ao buscar pedidos"
+        });
+    }
+});
+
+
+// Pedidos do entregador logado (ativos e histórico)
+app.get('/entregador/pedidos/meus',
+    autenticarToken, exigirRole('entregador'), async (req, res) => {
+
+    try {
+
+        const [rows] = await db.query(`
+            SELECT p.id_pedido, p.bairro, p.rua, p.numero, p.cep,
+                   p.complemento, p.telefone, p.valor, p.forma_pagamento,
+                   p.troco_para, p.status, p.data_pedido,
+                   c.nome AS cliente_nome
+            FROM pedidos p
+            LEFT JOIN clientes c ON c.id_cliente = p.id_cliente
+            WHERE p.id_entregador = ?
+            ORDER BY p.data_pedido DESC
+        `, [req.user.id]);
+
+        res.json(rows);
+
+    } catch (error) {
+
+        console.error("Erro ao listar meus pedidos:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Erro ao buscar pedidos"
+        });
+    }
+});
+
+
+// Aceitar pedido (um único UPDATE evita dois entregadores pegarem o mesmo)
+app.put('/entregador/pedidos/:id/aceitar',
+    autenticarToken, exigirRole('entregador'), async (req, res) => {
+
+    try {
+
+        const [r] = await db.query(`
+            UPDATE pedidos
+            SET id_entregador = ?
+            WHERE id_pedido = ?
+              AND id_entregador IS NULL
+              AND status IN ('confirmado', 'preparando')
+        `, [req.user.id, req.params.id]);
+
+        if (r.affectedRows === 0) {
+            return res.status(409).json({
+                success: false,
+                message: "Este pedido não está mais disponível"
+            });
         }
 
-        alert("Entregador recusado!");
+        res.json({
+            success: true,
+            message: "Pedido aceito"
+        });
 
-        listarEntregadores();
+    } catch (error) {
 
-    } catch (erro) {
+        console.error("Erro ao aceitar pedido:", error);
 
-        console.error(erro);
-
-        alert("Não foi possível recusar o entregador.");
+        res.status(500).json({
+            success: false,
+            message: "Erro ao aceitar pedido"
+        });
     }
-}
+});
+
+
+ // Atualizar perfil do próprio cliente
+app.put('/clientes/:id', autenticarToken, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { nome, email, telefone, bairro, rua, N_casa } = req.body;
+
+        // O cliente só pode editar a própria conta.
+        // O administrador também pode editar clientes.
+        if (
+            req.user.role !== ADMIN_ROLE &&
+            String(req.user.id) !== String(id)
+        ) {
+            return res.status(403).json({
+                success: false,
+                message: 'Sem permissão para editar este cliente.'
+            });
+        }
+
+        if (!nome?.trim() || !email?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Nome e email são obrigatórios.'
+            });
+        }
+
+        // Verifica se o email já pertence a outro cliente
+        const [emailExistente] = await db.query(
+            `SELECT id_cliente FROM clientes
+             WHERE email = ? AND id_cliente <> ?`,
+            [email.trim(), id]
+        );
+
+        if (emailExistente.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'Este email já está sendo utilizado.'
+            });
+        }
+
+        const [resultado] = await db.query(
+            `UPDATE clientes
+             SET nome = ?, email = ?, telefone = ?,
+                 bairro = ?, rua = ?, N_casa = ?
+             WHERE id_cliente = ?`,
+            [
+                nome.trim(),
+                email.trim(),
+                telefone?.trim() || null,
+                bairro?.trim() || null,
+                rua?.trim() || null,
+                N_casa?.trim() || null,
+                id
+            ]
+        );
+
+        if (resultado.affectedRows === 0) {
+            const [clienteExiste] = await db.query(
+                'SELECT id_cliente FROM clientes WHERE id_cliente = ?',
+                [id]
+            );
+
+            if (clienteExiste.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Cliente não encontrado.'
+                });
+            }
+        }
+
+        return res.json({
+            success: true,
+            message: 'Perfil atualizado com sucesso.'
+        });
+
+    } catch (error) {
+        console.error('Erro ao atualizar perfil:', error);
+
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({
+                success: false,
+                message: 'Este email já está cadastrado.'
+            });
+        }
+
+        return res.status(500).json({
+            success: false,
+            message: 'Erro interno ao atualizar o perfil.'
+        });
+    }
+});
+
+
+// Atualizar status (só nos pedidos dele e só nas transições permitidas)
+app.put('/entregador/pedidos/:id/status',
+    autenticarToken, exigirRole('entregador'), async (req, res) => {
+
+    const ORIGENS_VALIDAS = {
+        saiu_entrega: ['confirmado', 'preparando'],
+        entregue: ['saiu_entrega']
+    };
+
+    const { status } = req.body;
+
+    if (!ORIGENS_VALIDAS[status]) {
+        return res.status(400).json({
+            success: false,
+            message: "Status inválido para o entregador"
+        });
+    }
+
+    try {
+
+        const [r] = await db.query(`
+            UPDATE pedidos
+            SET status = ?
+            WHERE id_pedido = ?
+              AND id_entregador = ?
+              AND status IN (?)
+        `, [status, req.params.id, req.user.id, ORIGENS_VALIDAS[status]]);
+
+        if (r.affectedRows === 0) {
+            return res.status(409).json({
+                success: false,
+                message: "Não foi possível atualizar este pedido"
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Status atualizado"
+        });
+
+    } catch (error) {
+
+        console.error("Erro ao atualizar status:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Erro ao atualizar status"
+        });
+    }
+});
 
 
 // ==================== ROTA DE TESTE ====================
+
+require('./entregas')(app, db, autenticarToken);
 
 app.get('/health', (req, res) => {
 
@@ -1303,7 +1632,7 @@ app.get('/health', (req, res) => {
 
 // ==================== INICIAR SERVIDOR ====================
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
 
     console.log(
         `🚀 Servidor rodando na porta ${PORT}`
